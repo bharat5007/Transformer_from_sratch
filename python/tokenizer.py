@@ -83,3 +83,27 @@ class Tokenizer:
     def register_self_token(self):
         for token, idx in self.special_tokens.items():
             self.vocab[idx] = token.encode("utf-8")
+
+    def save(self, path):
+        data = {
+            "merges": {f"{p0},{p1}": idx for (p0, p1), idx in self.merges.items()},
+            "special_tokens": self.special_tokens,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    @classmethod
+    def load(cls, path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        tokenizer = cls(data["special_tokens"])
+        tokenizer.merges = {
+            (int(p0), int(p1)): idx
+            for key, idx in data["merges"].items()
+            for p0, p1 in [key.split(",")]
+        }
+        tokenizer.vocab = {idx: bytes([idx]) for idx in range(256)}
+        for (p0, p1), idx in tokenizer.merges.items():
+            tokenizer.vocab[idx] = tokenizer.vocab[p0] + tokenizer.vocab[p1]
+        tokenizer.register_self_token()
+        return tokenizer
