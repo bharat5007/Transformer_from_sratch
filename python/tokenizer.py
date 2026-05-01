@@ -68,6 +68,9 @@ class Tokenizer:
             count = {}
             for sub_text in tokens:
                 self.stats(sub_text, count)
+            if not count:
+                print(f"No pairs left to merge after {i} steps. Stopping early.")
+                break
             max_count = max(count.items(), key=lambda item: item[1])
             new_idx = 256 + i
             self.merges[max_count[0]] = new_idx
