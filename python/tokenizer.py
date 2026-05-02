@@ -30,6 +30,8 @@ class Tokenizer:
         while True:
             count = {}
             self.stats(tokens, count)
+            if not count:
+                break
             max_count = max(count.items(), key=lambda item: item[1] if item[0] in self.merges else float('-inf'))
             if max_count[0] not in self.merges:
                 break

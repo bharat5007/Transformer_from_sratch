@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tokenizer import Tokenizer 
+import random
+
 
 class Head(nn.Module):
 
@@ -34,73 +35,114 @@ class MultiHeadAttention(nn.Module):
         x = torch.cat([head.forward(tokens) for head in self.heads], dim=-1)
         x = self.proj(x)
         return x
-        
+
 class MultiheadBlock(nn.Module):
 
-    def __init__ (self, heads_num, seq_length, x_emb):
+    def __init__ (self, heads_num, x_emb):
         super().__init__()
-        self.layer_norm = nn.LayerNorm((seq_length, x_emb))
+        self.layer_norm = nn.LayerNorm(x_emb)
         self.heads = MultiHeadAttention(x_emb, heads_num, x_emb//heads_num)
 
     def forward(self, tokens):
-        x = self.heads(tokens)
-        x = self.layer_norm(x)
+        x = self.layer_norm(tokens)
+        x = self.heads(x)
         return tokens + x
-    
+
 class FeedFwdBlock(nn.Module):
 
-    def __init__(self, seq_length, x_emb):
+    def __init__(self, x_emb):
         super().__init__()
-        self.layer = nn.Linear(x_emb, x_emb)
-        self.layer_norm = nn.LayerNorm((seq_length, x_emb))
+        self.layer = nn.Sequential(
+        nn.Linear(x_emb, 4 * x_emb),
+        nn.GELU(),
+        nn.Linear(4 * x_emb, x_emb)
+    )
+        self.layer_norm = nn.LayerNorm(x_emb)
 
     def forward(self, tokens):
-        x = self.layer(tokens)
-        x = self.layer_norm(x)
+        x = self.layer_norm(tokens)
+        x = self.layer(x)
         return tokens + x
-    
-class Encoder:
 
-    def __init__(self, vocab_size: int, x_emb: int, seq_len: int, heads_num: int, special_tokens = {}):
+class EncoderArchitecture(nn.Module):
+
+    def __init__(self, x_emb, heads_num):
+        super().__init__()
+        self.multihead = MultiheadBlock(heads_num, x_emb)
+        self.feed_fwd = FeedFwdBlock(x_emb)
+
+    def forward(self, tokens):
+        x = self.multihead(tokens)
+        x = self.feed_fwd(x)
+        return x
+
+class Encoder(nn.Module):
+
+    def __init__(self, vocab_size: int, x_emb: int, seq_len: int, heads_num: int, encoder_num: int):
+        super().__init__()
         self.seq_len = seq_len
-        self.special_tokens = special_tokens
-        self.look_up_table = torch.randn((vocab_size+2, x_emb))
-        self.postional_enc = torch.randn((x_emb, seq_len))
-        self.architecture = nn.ModuleList([
-            MultiheadBlock(heads_num, seq_len, x_emb),
-            FeedFwdBlock(seq_len, x_emb)
-        ])
-        self.tokenizer = Tokenizer(special_tokens)
+        self.MASK_TOKEN_ID = vocab_size+2
+        self.look_up_table = nn.Parameter(torch.randn((vocab_size+3, x_emb)))
+        self.postional_enc = nn.Parameter(torch.randn((seq_len, x_emb)))
+        self.architecture = nn.ModuleList([EncoderArchitecture(x_emb, heads_num) for _ in range(encoder_num)])
+        self.lm_head = nn.Linear(x_emb, vocab_size)
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3)
 
-    def add_padding(self, tokens: list):
-        if len(tokens) >= self.seq_len:
-            return tokens[: self.seq_len]
-        else:
-            padding_size = self.seq_len - len(tokens)
-            padding = [301]*padding_size
-            return tokens + padding
-
-    def forward(self, text: str, targets = None):
-        # implement tokenizer here
-        tokens = self.tokenizer.encode(text)
-        tokens = self.add_padding(tokens)
+    def encode(self, tokens):
         tokens = torch.tensor(tokens)
-
-        loss = None
-
-        # lookup_table + postional_enc
-        x = self.look_up_table[tokens] + (tokens * self.postional_enc).T
-
+        T = tokens.shape[1]
+        x = self.look_up_table[tokens] + self.postional_enc[torch.arange(T)]
         for block in self.architecture:
             x = block(x)
-        
-        if targets:
-            B, T, C = x.shape
-            x = x.view(B*T, C)
-            targets = targets.view(B*T)
-            loss = F.cross_entropy(x, targets)
-        
-        return x, loss
-    
-test_encoder = Encoder(300, 20, 100, 4, {"<|endoftext|>": 50256, "<|padding|>": 50257})
-test_encoder.forward("Hi bharat")
+        return x  # (B, T, x_emb)
+
+    def forward(self, tokens, targets=None):
+        loss = None
+        x = self.encode(tokens)
+        logits = self.lm_head(x)       # (B, T, vocab_size)
+
+        if targets is not None:
+            targets = torch.tensor(targets)
+            B, T, C = logits.shape
+            loss = F.cross_entropy(logits.view(B*T, C), targets.view(B*T))
+
+        return logits, loss
+
+    def fit(self, tokens, epochs=100, batch_size=32):
+        chunks = []
+        for i in range(0, len(tokens) - self.seq_len + 1, self.seq_len + 1):
+            chunks.append(tokens[i : i + self.seq_len + 1])
+
+        last = tokens[len(chunks) * (self.seq_len + 1):]
+        if len(last) > 0:
+            last = last + [0] * (self.seq_len - len(last) + 1)
+            chunks.append(last)
+
+        x_chunks = []
+        y_chunks = []
+        for chunk in chunks:
+            x = chunk.copy()
+            y = [-100] * len(chunk)
+
+            for i, token in enumerate(chunk):
+                if random.random() < 0.15:
+                    y[i] = token
+                    x[i] = self.MASK_TOKEN_ID
+
+        for epoch in range(epochs):
+            combined = list(zip(x_chunks, y_chunks))
+            random.shuffle(combined)
+            x_shuffled, y_shuffled = zip(*combined)
+            x, y = list(x_shuffled), list(y_shuffled)
+
+            x_batch, y_batch = [], []
+            for _ in range(batch_size):
+                i = random.randint(0, len(x) - 1)
+                x_batch.append(x[i])
+                y_batch.append(y[i])
+
+            output, loss = self.forward(x_batch, y_batch)
+            print(f"Loss: {loss.item():.4f}, epoch: {epoch}")
+            loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
