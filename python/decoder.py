@@ -49,7 +49,7 @@ class Head(nn.Module):
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, x_emb, head_emb, heads_num, cross_attention = False, masking_enabled = False):
+    def __init__(self, x_emb, heads_num, cross_attention = False, masking_enabled = False):
         super().__init__()
         self.proj = nn.Linear(x_emb, x_emb)
         self.heads = nn.ModuleList([Head(x_emb, x_emb//heads_num, masking_enabled, cross_attention) for _ in range(heads_num)])
@@ -65,22 +65,26 @@ class MultiHeadAttention(nn.Module):
 
 class MultiHeadBlock(nn.Module):
 
-    def __init__(self, seq_len, x_emb, head_emb, heads_num, cross_attention = False, masking_enabled = False):
+    def __init__(self, x_emb, heads_num, cross_attention = False, masking_enabled = False):
         super().__init__()
-        self.heads = MultiHeadAttention(x_emb, head_emb, heads_num, cross_attention, masking_enabled)
-        self.layer_norm = nn.LayerNorm((seq_len, x_emb))
+        self.heads = MultiHeadAttention(x_emb, heads_num, cross_attention, masking_enabled)
+        self.layer_norm = nn.LayerNorm(x_emb)
 
     def forward(self, tokens, encoder_logits = None):
-        logits = self.heads(tokens, encoder_logits)
-        logits_norm = self.layer_norm(logits)
-        return logits_norm + tokens
-
+        logits_norm = self.layer_norm(tokens)
+        logits = self.heads(logits_norm, encoder_logits)
+        return logits + tokens
+    
 class FeedFwdBlock(nn.Module):
 
-    def __init__(self, seq_len, x_emb):
+    def __init__(self, x_emb):
         super().__init__()
-        self.linear = nn.Linear(x_emb, x_emb)
-        self.layer_norm = nn.LayerNorm((seq_len, x_emb))
+        self.layer = nn.Sequential(
+        nn.Linear(x_emb, 4 * x_emb),
+        nn.GELU(),
+        nn.Linear(4 * x_emb, x_emb)
+    )
+        self.layer_norm = nn.LayerNorm(x_emb)
 
     def forward(self, tokens):
         logits = self.linear(tokens)
@@ -89,50 +93,49 @@ class FeedFwdBlock(nn.Module):
 
 class DecoderArchitecture(nn.Module):
 
-    def __init__(self, vocab_size, seq_len, x_emb, head_emb, heads_num, encoder_num):
+    def __init__(self, vocab_size, seq_len, x_emb, heads_num, encoder_num):
         super().__init__()
-        self.self_attention = MultiHeadBlock(seq_len, x_emb, head_emb, heads_num, cross_attention=False, masking_enabled=True)
-        self.encoder = Encoder(vocab_size, x_emb, seq_len, heads_num, encoder_num)
-        self.cross_attention = MultiHeadBlock(seq_len, x_emb, head_emb, heads_num, cross_attention=True, masking_enabled=True)
-        self.feed_fwd = FeedFwdBlock(seq_len, x_emb)
+        self.self_attention = MultiHeadBlock(x_emb, heads_num, cross_attention=False, masking_enabled=True)
+        self.cross_attention = MultiHeadBlock(x_emb, heads_num, cross_attention=True, masking_enabled=False)
+        self.feed_fwd = FeedFwdBlock(x_emb)
 
-    def forward(self, x, tokens):
+    def forward(self, x, encoder_hidden):
         logits = self.self_attention(x)
-        encoder_hidden = self.encoder.encode(tokens)
         logits = self.cross_attention(logits, encoder_hidden)
         logits = self.feed_fwd(logits)
         return logits
     
 class Decoder(nn.Module):
 
-    def __init__(self, vocab_size, seq_len, x_emb, head_emb, heads_num, decoder_num: int = 6, encoder_num: int = 6):
+    def __init__(self, vocab_size, seq_len, x_emb, heads_num, decoder_num: int = 6, encoder_num: int = 6):
         super().__init__()
         self.seq_len = seq_len
-        self.architecture = nn.ModuleList([DecoderArchitecture(vocab_size, seq_len, x_emb, head_emb, heads_num, encoder_num) for _ in range(decoder_num)])
+        self.encoder = Encoder(vocab_size, x_emb, seq_len, heads_num, encoder_num)
+        self.architecture = nn.ModuleList([DecoderArchitecture(vocab_size, seq_len, x_emb, heads_num, encoder_num) for _ in range(decoder_num)])
         self.linear = nn.Linear(x_emb, vocab_size)
         self.look_up_table = nn.Parameter(torch.randn((vocab_size+2, x_emb)))
         self.postional_enc = nn.Parameter(torch.randn((seq_len, x_emb)))
-        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3)
 
     def forward(self, tokens, target=None):
+        encoder_hidden = self.encoder.encode(tokens)
         loss = None
         B, T = tokens.shape
         x = self.look_up_table[tokens] + self.postional_enc[torch.arange(T)]
 
         for decoder in self.architecture:
-            x = decoder(x, tokens)
+            x = decoder(x, encoder_hidden)
 
         x = self.linear(x)
 
         if target is not None:
             target = torch.tensor(target)
             B, T, C = x.shape
-            print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  {x.view(B*T, C).shape}       {target.view(B*T).shape}")
             loss = F.cross_entropy(x.view(B*T, C), target.view(B*T))
 
         return x, loss
 
     def fit(self, tokens, epochs=100, batch_size=32):
+        optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3)
         if len(tokens) % (self.seq_len+1) != 0:
             pad = self.seq_len + 1 - len(tokens) % (self.seq_len+1)
             tokens.extend([0] * pad)
@@ -154,5 +157,5 @@ class Decoder(nn.Module):
             output, loss = self.forward(x_batch, y_batch)
             loss.backward()
             print(f"epoch: {epoch}, loss: {loss.item():.4f}")
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+            optimizer.step()
+            optimizer.zero_grad()
