@@ -3,6 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import random
 
+import sys, os
+sys.path.insert(0, os.path.abspath(".."))
+from python.tokenizer import Tokenizer
+
+text = ""
+with open('../dataset/1 - A Game of Thrones.txt', 'r', encoding='utf-8', errors='ignore') as f:
+    text += f.read()
+
+tokenizer = Tokenizer.load("../tokenizer.json")
+tokens = tokenizer.encode(text)
+
 
 class Head(nn.Module):
 
@@ -89,7 +100,6 @@ class Encoder(nn.Module):
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3)
 
     def encode(self, tokens):
-        tokens = torch.tensor(tokens)
         T = tokens.shape[1]
         x = self.look_up_table[tokens] + self.postional_enc[torch.arange(T)]
         for block in self.architecture:
@@ -97,8 +107,15 @@ class Encoder(nn.Module):
         return x  # (B, T, x_emb)
 
     def forward(self, tokens, targets=None):
+        tokens = torch.tensor(tokens)
+        B, T = tokens.shape
         loss = None
-        x = self.encode(tokens)
+
+        x = self.look_up_table[tokens] + self.postional_enc[torch.arange(T)]
+
+        for block in self.architecture:
+            x = block(x)
+
         logits = self.lm_head(x)       # (B, T, vocab_size)
 
         if targets is not None:
@@ -110,10 +127,10 @@ class Encoder(nn.Module):
 
     def fit(self, tokens, epochs=100, batch_size=32):
         chunks = []
-        for i in range(0, len(tokens) - self.seq_len + 1, self.seq_len + 1):
-            chunks.append(tokens[i : i + self.seq_len + 1])
+        for i in range(0, len(tokens) - self.seq_len, self.seq_len):
+            chunks.append(tokens[i : i + self.seq_len])
 
-        last = tokens[len(chunks) * (self.seq_len + 1):]
+        last = tokens[len(chunks) * (self.seq_len):]
         if len(last) > 0:
             last = last + [0] * (self.seq_len - len(last) + 1)
             chunks.append(last)
@@ -128,6 +145,8 @@ class Encoder(nn.Module):
                 if random.random() < 0.15:
                     y[i] = token
                     x[i] = self.MASK_TOKEN_ID
+            x_chunks.append(x)
+            y_chunks.append(y)
 
         for epoch in range(epochs):
             combined = list(zip(x_chunks, y_chunks))
