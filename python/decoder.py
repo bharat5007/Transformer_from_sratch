@@ -87,7 +87,7 @@ class FeedFwdBlock(nn.Module):
         self.layer_norm = nn.LayerNorm(x_emb)
 
     def forward(self, tokens):
-        logits = self.linear(tokens)
+        logits = self.layer(tokens)
         logits_norm = self.layer_norm(logits)
         return logits_norm + tokens
 
