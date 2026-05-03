@@ -97,7 +97,6 @@ class Encoder(nn.Module):
         self.postional_enc = nn.Parameter(torch.randn((seq_len, x_emb)))
         self.architecture = nn.ModuleList([EncoderArchitecture(x_emb, heads_num) for _ in range(encoder_num)])
         self.lm_head = nn.Linear(x_emb, vocab_size)
-        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3)
 
     def encode(self, tokens):
         T = tokens.shape[1]
@@ -108,14 +107,7 @@ class Encoder(nn.Module):
 
     def forward(self, tokens, targets=None):
         tokens = torch.tensor(tokens)
-        B, T = tokens.shape
-        loss = None
-
-        x = self.look_up_table[tokens] + self.postional_enc[torch.arange(T)]
-
-        for block in self.architecture:
-            x = block(x)
-
+        x = self.encode(tokens)
         logits = self.lm_head(x)       # (B, T, vocab_size)
 
         if targets is not None:
@@ -126,13 +118,14 @@ class Encoder(nn.Module):
         return logits, loss
 
     def fit(self, tokens, epochs=100, batch_size=32):
+        optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3)
         chunks = []
         for i in range(0, len(tokens) - self.seq_len, self.seq_len):
             chunks.append(tokens[i : i + self.seq_len])
 
         last = tokens[len(chunks) * (self.seq_len):]
         if len(last) > 0:
-            last = last + [0] * (self.seq_len - len(last) + 1)
+            last = last + [0] * (self.seq_len - len(last))
             chunks.append(last)
 
         x_chunks = []
@@ -163,5 +156,5 @@ class Encoder(nn.Module):
             output, loss = self.forward(x_batch, y_batch)
             print(f"Loss: {loss.item():.4f}, epoch: {epoch}")
             loss.backward()
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+            optimizer.step()
+            optimizer.zero_grad()
